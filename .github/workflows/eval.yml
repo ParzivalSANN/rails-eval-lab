@@ -1,0 +1,93 @@
+name: Evaluation
+
+on:
+  pull_request:
+    branches: [submissions]
+
+# Write access: PR comments + leaderboard branch push
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # 1. Checkout MAIN — source of truth for all code except user_data_fetcher.rb
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0   # needed for git show pr-head and git worktree
+
+      # 2. Extract ONLY user_data_fetcher.rb from the student's PR
+      #    Everything else (scoring, seeds, CI config) stays from main.
+      - name: Extract student's user_data_fetcher.rb
+        run: |
+          git fetch origin pull/${{ github.event.pull_request.number }}/head:pr-head
+          git show pr-head:app/services/user_data_fetcher.rb > /tmp/student_fetcher.rb
+          echo "--- Student's implementation ---"
+          cat /tmp/student_fetcher.rb
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+
+      - name: Create storage directory
+        run: mkdir -p storage tmp
+
+      # 3. Seed with ORIGINAL code → baseline measured and stored in Challenge record
+      - name: Setup DB and measure baseline
+        run: bin/rails db:create db:migrate db:seed
+        env:
+          RAILS_ENV: development
+
+      # 4. Swap in student's file — fresh Ruby process picks it up in next step
+      - name: Swap in student's implementation
+        run: cp /tmp/student_fetcher.rb app/services/user_data_fetcher.rb
+
+      # 5. Run evaluation: 3 runs, median time, deterministic queries
+      - name: Run evaluation
+        run: bundle exec ruby script/ci_eval.rb
+        env:
+          RAILS_ENV: development
+          STUDENT_USERNAME: ${{ github.event.pull_request.user.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      # 6. Post score card as PR comment
+      - name: Post score to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const comment = fs.readFileSync('tmp/eval_comment.md', 'utf8');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      # 7. Build updated LEADERBOARD.md (reads existing from leaderboard branch)
+      - name: Update leaderboard
+        run: bundle exec ruby script/update_leaderboard.rb
+        env:
+          STUDENT_USERNAME: ${{ github.event.pull_request.user.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      # 8. Push updated LEADERBOARD.md to leaderboard branch via git worktree
+      - name: Push leaderboard
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin leaderboard
+          git worktree add /tmp/lb-worktree origin/leaderboard
+          cp tmp/LEADERBOARD.md /tmp/lb-worktree/LEADERBOARD.md
+          cd /tmp/lb-worktree
+          git add LEADERBOARD.md
+          git diff --cached --quiet || git commit -m "leaderboard: ${{ github.event.pull_request.user.login }} (#${{ github.event.pull_request.number }})"
+          git push origin HEAD:leaderboard
