@@ -8,6 +8,7 @@ on:
 permissions:
   pull-requests: write
   contents: write
+  issues: write
 
 jobs:
   evaluate:
@@ -91,3 +92,8 @@ jobs:
           git add LEADERBOARD.md
           git diff --cached --quiet || git commit -m "leaderboard: ${{ github.event.pull_request.user.login }} (#${{ github.event.pull_request.number }})"
           git push origin HEAD:leaderboard
+
+      - name: Debug token permissions
+        run: |
+          echo "Actor: ${{ github.actor }}"
+          echo "Event: ${{ github.event_name }}"
